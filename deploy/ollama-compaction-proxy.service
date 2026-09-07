@@ -1,0 +1,39 @@
+[Unit]
+Description=Ollama compaction proxy
+After=network-online.target ollama.service ollama-tokenizer.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/ollama-compaction-proxy
+Environment="LISTEN_ADDR=:8082"
+Environment="OLLAMA_URL=http://127.0.0.1:11434"
+Environment="TOKENIZER_URL=http://127.0.0.1:8081"
+Environment="LOG_LEVEL=info"
+# Non-streaming inference on the 27B at low tok/s can run many minutes; the
+# defaults (upstream 10m, summarize 5m) sit right on that edge and abort a slow
+# turn. Give generous headroom so a long-but-healthy inference is never cut.
+Environment="UPSTREAM_TIMEOUT=30m"
+Environment="SUMMARIZE_TIMEOUT=15m"
+# COMPACT_HMAC_KEY is injected from /etc/ollama-compaction-proxy/env by the
+# deploy script so blobs survive restarts and never live in the unit file.
+EnvironmentFile=-/etc/ollama-compaction-proxy/env
+
+# HTTP-only sidecar: no model files, no state on disk.
+User=ollama
+Group=ollama
+
+Restart=on-failure
+RestartSec=3
+MemoryMax=1G
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

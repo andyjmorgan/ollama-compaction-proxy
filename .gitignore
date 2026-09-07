@@ -1,0 +1,12 @@
+# Build output
+/ollama-compaction-proxy
+/tokenizer-service/ollama-tokenizer
+*.exe
+
+# Go workspace (local dev only)
+go.work
+go.work.sum
+
+# Python venvs for sdk-tests
+sdk-tests/.venv/
+__pycache__/

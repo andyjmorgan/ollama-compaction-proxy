@@ -1,0 +1,33 @@
+[Unit]
+Description=Ollama token count service
+Documentation=https://github.com/andyjmorgan
+After=network-online.target ollama.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/ollama-tokenizer
+Environment="OLLAMA_URL=http://127.0.0.1:11434"
+Environment="LISTEN_ADDR=:8081"
+Environment="LOG_LEVEL=info"
+
+# The service only talks to Ollama over HTTP; it never reads model blobs.
+User=ollama
+Group=ollama
+
+Restart=on-failure
+RestartSec=3
+
+# Tokenizer vocabularies live in RAM: roughly 60-100MB per cached model.
+MemoryMax=4G
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target
