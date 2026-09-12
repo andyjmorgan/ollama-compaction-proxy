@@ -174,3 +174,15 @@ ssh 192.168.69.28 'journalctl -u ollama-tokenizer -f'
 
 The unit runs as the `ollama` user with no filesystem access to model blobs —
 everything arrives over HTTP.
+
+## Anthropic Messages callers
+
+Send `X-Tokenizer-Dialect: anthropic` to `/count-tokens`. This uses Ollama's
+`anthropic.FromMessagesRequest` before rendering: tools become native function
+schemas, tool calls/results preserve their structure, and system/thinking
+conversion follows the inference endpoint. The compaction proxy now sets this
+header for all Anthropic counting. Without it the generic extractor remains
+for existing Ollama/OpenAI callers. The Ollama module is pinned to 0.34.0-rc3
+to match the current Spark daemon. Counts remain estimates; inference usage
+is authoritative, and both noncached and cached input tokens must be included
+when measuring parity.

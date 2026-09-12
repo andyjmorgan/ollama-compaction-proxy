@@ -41,6 +41,7 @@ func main() {
 
 	router := httpapi.NewRouter(httpapi.Routes{
 		Messages:         anthropic.Messages,
+		Models:           anthropic.Models,
 		CountTokens:      anthropic.CountTokens,
 		Responses:        openaiHandler.Responses,
 		ResponsesCompact: openaiHandler.Compact,

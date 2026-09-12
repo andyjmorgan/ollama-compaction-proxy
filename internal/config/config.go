@@ -3,6 +3,7 @@ package config
 
 import (
 	"crypto/rand"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -10,8 +11,16 @@ import (
 	"time"
 )
 
+// ClaudeModel is an opt-in native Claude compaction policy.
+type ClaudeModel struct {
+	ContextWindow   int `json:"context_window"`
+	MaxOutputTokens int `json:"max_output_tokens"`
+	CompactAt       int `json:"compact_at_input_tokens"`
+}
+
 // Config is the proxy's runtime configuration.
 type Config struct {
+	ClaudeModels map[string]ClaudeModel
 	ListenAddr   string
 	OllamaURL    string
 	TokenizerURL string
@@ -87,6 +96,20 @@ func FromEnv() (*Config, error) {
 			"compaction blobs will not survive a restart")
 	}
 
+	if file := os.Getenv("CLAUDE_MODEL_POLICY_FILE"); file != "" {
+		raw, err := os.ReadFile(file)
+		if err != nil {
+			return nil, fmt.Errorf("read Claude policies: %w", err)
+		}
+		if err = json.Unmarshal(raw, &cfg.ClaudeModels); err != nil {
+			return nil, fmt.Errorf("decode Claude policies: %w", err)
+		}
+		for model, p := range cfg.ClaudeModels {
+			if model == "" || p.CompactAt < 1024 || p.MaxOutputTokens < 1 || p.ContextWindow <= p.MaxOutputTokens || p.CompactAt >= p.ContextWindow-p.MaxOutputTokens {
+				return nil, fmt.Errorf("invalid Claude policy for %q", model)
+			}
+		}
+	}
 	if cfg.MinTrigger < 1 {
 		return nil, fmt.Errorf("COMPACT_MIN_TRIGGER must be positive")
 	}

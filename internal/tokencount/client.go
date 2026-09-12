@@ -32,11 +32,23 @@ func New(baseURL string) *Client {
 // any JSON object the tokenizer service's extractor understands — both the
 // Anthropic and OpenAI wire shapes map directly onto its fields.
 func (c *Client) Count(ctx context.Context, body []byte) (int, error) {
+	return c.count(ctx, body, "")
+}
+
+// CountAnthropic uses Ollama's Messages-to-chat conversion before rendering.
+func (c *Client) CountAnthropic(ctx context.Context, body []byte) (int, error) {
+	return c.count(ctx, body, "anthropic")
+}
+
+func (c *Client) count(ctx context.Context, body []byte, dialect string) (int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/count-tokens", bytes.NewReader(body))
 	if err != nil {
 		return 0, fmt.Errorf("build count request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if dialect != "" {
+		req.Header.Set("X-Tokenizer-Dialect", dialect)
+	}
 
 	resp, err := c.hc.Do(req)
 	if err != nil {
@@ -45,7 +57,7 @@ func (c *Client) Count(ctx context.Context, body []byte) (int, error) {
 	defer resp.Body.Close()
 
 	var decoded struct {
-		Tokens int    `json:"tokens"`
+		Tokens *int   `json:"tokens"`
 		Error  string `json:"error"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
@@ -54,5 +66,8 @@ func (c *Client) Count(ctx context.Context, body []byte) (int, error) {
 	if resp.StatusCode != http.StatusOK {
 		return 0, fmt.Errorf("tokenizer returned %d: %s", resp.StatusCode, decoded.Error)
 	}
-	return decoded.Tokens, nil
+	if decoded.Tokens == nil || *decoded.Tokens < 0 {
+		return 0, fmt.Errorf("tokenizer returned an invalid count")
+	}
+	return *decoded.Tokens, nil
 }

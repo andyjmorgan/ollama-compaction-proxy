@@ -426,3 +426,21 @@ func TestThinkingCapabilityChangesCount(t *testing.T) {
 		t.Errorf("think:false count = %d, want %d (same as a non-thinking model)", off, base)
 	}
 }
+
+// Equivalent native and Anthropic tool-bearing requests must render identically.
+// In particular, an Anthropic tool schema must not become an empty native tool.
+func TestAnthropicDialectPreservesTools(t *testing.T) {
+	h, _ := defaultService(t)
+	native := `{"model":"fake-model:1b","messages":[{"role":"user","content":"weather"}],"tools":[{"type":"function","function":{"name":"weather","description":"look up a city","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}}]}`
+	wire := `{"model":"fake-model:1b","messages":[{"role":"user","content":[{"type":"text","text":"weather"}]}],"tools":[{"name":"weather","description":"look up a city","input_schema":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}]}`
+	want := mustCount(t, h, native)
+	req := httptest.NewRequest("POST", "/count-tokens", strings.NewReader(wire))
+	req.Header.Set("X-Tokenizer-Dialect", "anthropic")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	var got countBody
+	json.Unmarshal(rec.Body.Bytes(), &got)
+	if rec.Code != 200 || got.Tokens != want {
+		t.Fatalf("Anthropic count %d (%s), native %d", got.Tokens, rec.Body, want)
+	}
+}

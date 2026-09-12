@@ -16,11 +16,13 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath \
     -ldflags="-s -w" -o "/tmp/${BIN}" ./cmd/server
 
 echo "==> copying to ${HOST}"
-scp -q "/tmp/${BIN}" "deploy/${UNIT}" "${HOST}:/tmp/"
+scp -q "/tmp/${BIN}" "deploy/${UNIT}" "deploy/claude-models.json" "${HOST}:/tmp/"
 
 echo "==> installing"
 ssh "${HOST}" "
     set -euo pipefail
+    sudo mkdir -p /etc/ollama-compaction-proxy
+    sudo install -m 0644 /tmp/claude-models.json /etc/ollama-compaction-proxy/claude-models.json
     sudo install -m 0755 /tmp/${BIN} /usr/local/bin/${BIN}
     sudo install -m 0644 /tmp/${UNIT} /etc/systemd/system/${UNIT}
 
@@ -35,7 +37,7 @@ ssh "${HOST}" "
     sudo systemctl daemon-reload
     sudo systemctl enable --now ${UNIT}
     sudo systemctl restart ${UNIT}
-    rm -f /tmp/${BIN} /tmp/${UNIT}
+    rm -f /tmp/${BIN} /tmp/${UNIT} /tmp/claude-models.json
 "
 
 echo "==> waiting for health"

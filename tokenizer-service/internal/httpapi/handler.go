@@ -14,6 +14,7 @@ import (
 	"github.com/andyjmorgan/ollama-compaction-proxy/tokenizer-service/internal/ollama"
 	"github.com/andyjmorgan/ollama-compaction-proxy/tokenizer-service/internal/render"
 	"github.com/andyjmorgan/ollama-compaction-proxy/tokenizer-service/internal/tokenizer"
+	"github.com/ollama/ollama/anthropic"
 )
 
 // maxBodyBytes caps request bodies. Prompts get large, but not this large.
@@ -57,6 +58,25 @@ func (h *Handler) countTokens(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Use the same conversion as the inference endpoint. Flattening typed
+	// Anthropic blocks loses tool names/schemas, call/result structure and thinking.
+	if r.Header.Get("X-Tokenizer-Dialect") == "anthropic" {
+		var wire anthropic.MessagesRequest
+		if err := json.Unmarshal(body, &wire); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid Anthropic request")
+			return
+		}
+		chat, err := anthropic.FromMessagesRequest(wire)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "unsupported Anthropic request")
+			return
+		}
+		body, err = json.Marshal(chat)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "cannot normalize Anthropic request")
+			return
+		}
+	}
 	req, err := extract.Parse(body)
 	if err != nil {
 		// Both are client mistakes; neither is worth logging the body for.

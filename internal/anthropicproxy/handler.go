@@ -53,9 +53,16 @@ func (h *Handler) Messages(w http.ResponseWriter, r *http.Request) {
 	var prefixed bool
 	req.Model, prefixed = h.cfg.StripModelPrefix(req.Model)
 
+	if h.enforceClaudeBudget(w, r, &req, body) {
+		return
+	}
+	if r.Header.Get("X-Claude-Compaction") == "native" {
+		prefixed = true
+	}
 	a := analyze(&req, h.cfg.DefaultTriggerAnthropic, h.cfg.MinTrigger)
 	log := h.log.With(
 		"dialect", "anthropic", "path", "/v1/messages", "model", req.Model,
+		"session_id", r.Header.Get("X-Claude-Code-Session-Id"),
 		"stream", req.Stream, "incoming_compaction", a.incoming != nil,
 	)
 
@@ -234,6 +241,7 @@ func (h *Handler) forwardStream(w http.ResponseWriter, ctx context.Context, body
 	}
 
 	sawTerminal := false
+	var finalUsage map[string]int
 	for {
 		frame, err := resp.Frames.Next()
 		if err != nil {
@@ -243,6 +251,14 @@ func (h *Handler) forwardStream(w http.ResponseWriter, ctx context.Context, body
 			break
 		}
 
+		if frame.Event == "message_delta" {
+			var delta struct {
+				Usage map[string]int `json:"usage"`
+			}
+			if json.Unmarshal(frame.Data, &delta) == nil {
+				finalUsage = delta.Usage
+			}
+		}
 		out := []upstream.Frame{frame}
 		if in != nil {
 			out, err = in.rewrite(frame)
@@ -269,6 +285,8 @@ func (h *Handler) forwardStream(w http.ResponseWriter, ctx context.Context, body
 		log.Warn("stream truncated; synthesized terminal error", "stream_truncated", true)
 	}
 	log.Info("request served", "status", 200, "compaction_triggered", c != nil,
+		"authoritative_input_tokens", finalUsage["input_tokens"]+finalUsage["cache_read_input_tokens"]+finalUsage["cache_creation_input_tokens"],
+		"output_tokens", finalUsage["output_tokens"],
 		"duration_ms", time.Since(start).Milliseconds())
 }
 
@@ -322,5 +340,5 @@ func (h *Handler) countRequest(ctx context.Context, req *messages.MessagesReques
 	if err != nil {
 		return 0, err
 	}
-	return h.counter.Count(ctx, payload)
+	return h.counter.CountAnthropic(ctx, payload)
 }

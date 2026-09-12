@@ -21,7 +21,7 @@ Anthropic SDK ──┐                          ┌── /v1/messages ──�
 OpenAI SDK ─────┼──► compaction proxy ─────┼── /v1/responses ─────┼──► Ollama
 Agents SDK ─────┘        :8082             └── /v1/chat/completions┘   :11434
                            │
-                           └──► ollama-tokenizer-service :8081  (exact counts)
+                           └──► ollama-tokenizer-service :8081  (rendered counts)
 ```
 
 ## Repository layout
@@ -43,8 +43,8 @@ module is not part of the root module's package tree.
 1. Each request is inspected. A round-tripped compaction block/item is
    **reconstituted**: the compacted history is replaced by the carried summary
    before the model sees anything.
-2. The post-substitution request is **counted exactly** (via the tokenizer
-   service — 0-drift rendering-aware counts, not estimates).
+2. The post-substitution request is **counted using the model tokenizer** (via the tokenizer
+   service, after dialect normalization and model-specific rendering).
 3. If the request opts into compaction and the count crosses the trigger, the
    history is **summarized through Ollama** (`COMPACT_MODEL`, or the request's
    model) and the request is rebuilt around the summary.
@@ -85,10 +85,28 @@ r = client.beta.messages.create(model="gemma4:e4b", max_tokens=1000,
 history.append({"role": "assistant", "content": [b.model_dump(exclude_unset=True) for b in r.content]})
 ```
 
-Claude Code / Claude Agent SDK need none of this: their auto-compact is
-client-side, driven by token accounting — served here by accurate usage
-passthrough plus a real `POST /v1/messages/count_tokens` (which applies the
-same substitution as a live turn, so post-compaction counts are true).
+Claude Code / Claude Agent SDK use **client-side** compaction, a different
+contract from the server-side compact edit above. Opt in with
+`X-Claude-Compaction: native` and configure `CLAUDE_MODEL_POLICY_FILE` (see
+`deploy/claude-models.json`). The proxy counts each Messages request using the
+Anthropic dialect and returns a standard `prompt is too long` error at that
+model's budget. Claude performs its own reactive summary and continues the
+same session, including native subagents. Recognized summary requests can use
+the physical window minus the output reserve. Counting outages fail closed on
+this opt-in path; requests without the header retain their previous behavior.
+
+`GET /v1/compaction/models` (also `/v1/models` when accessed directly) exposes
+the configured serving windows, output limits and compaction budgets. In Claude
+2.1.269, generic gateway `/v1/models` discovery is only a picker facility and
+ignores these context fields. The SDK application must read the explicit
+policy endpoint and configure the runtime. The process-global window cannot
+represent mixed Qwen/Gemma limits; the proxy applies each model's own budget.
+
+Validated application and full test harness:
+`/home/localuser/source/anthropic-agent-sdk-example`. Runtime compatibility is
+pinned to Claude Code 2.1.269; rerun the native SDK compaction acceptance test
+before upgrading. Summary recognition is compatibility logic, not an auth
+boundary, and never bypasses the physical context reserve.
 
 The Agents SDK's `OpenAIResponsesCompactionSession` works against
 `/v1/responses/compact` — note its *client-side* model-name gate accepts only
@@ -99,6 +117,7 @@ The Agents SDK's `OpenAIResponsesCompactionSession` works against
 
 | Endpoint | Behavior |
 |---|---|
+| `GET /v1/compaction/models` | Configured native Claude serving policies (also GET /v1/models directly) |
 | `POST /v1/messages` | Anthropic dialect + compaction |
 | `POST /v1/messages/count_tokens` | Proxy-implemented (Ollama has none); substitution-aware |
 | `POST /v1/responses` | OpenAI dialect + compaction |
@@ -124,10 +143,13 @@ The Agents SDK's `OpenAIResponsesCompactionSession` works against
 - `message_start.usage.input_tokens` is a `len/4` estimate; `message_delta`'s
   value is authoritative (SDKs already treat it that way).
 
-**Model caveat**: qwen3-family models undercount 30–65% in the tokenizer
-service (Jinja chat templates aren't renderable in Go). Compaction triggers on
-those models fire late; prefer gemma4 / muse-glimmer / gpt-oss for
-threshold-sensitive workloads, or set conservative thresholds.
+**Counting caveat**: these are rendering-based estimates, not a promise of
+zero drift. Anthropic requests must use `X-Tokenizer-Dialect: anthropic` at the
+tokenizer service (the proxy sets it). Generic flattening loses tool schemas
+and call/result structure. Qwen 3.6 plain-text parity was exact in the lab;
+small residual differences remain for complex tool-bearing prompts. Old
+Qwen models using unsupported Jinja templates can still fall back to
+concatenation; inspect the tokenizer's render tier before enabling a policy.
 
 ## Configuration
 
@@ -136,6 +158,7 @@ threshold-sensitive workloads, or set conservative thresholds.
 | `LISTEN_ADDR` | `:8082` | |
 | `OLLAMA_URL` | `http://127.0.0.1:11434` | |
 | `TOKENIZER_URL` | `http://127.0.0.1:8081` | ollama-tokenizer-service |
+| `CLAUDE_MODEL_POLICY_FILE` | *(unset)* | JSON map of actual Ollama model IDs to context_window, max_output_tokens, compact_at_input_tokens; native Claude opt-in only |
 | `COMPACT_MODEL` | *(request model)* | dedicated summarizer model |
 | `MODEL_PREFIX` | `agent/` | routing prefix stripped from model names; empty disables |
 | `COMPACT_HMAC_KEY` | *(random per boot + warning)* | persist it — deploy generates one in `/etc/ollama-compaction-proxy/env` |

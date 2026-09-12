@@ -10,6 +10,7 @@ Environment="LISTEN_ADDR=:8082"
 Environment="OLLAMA_URL=http://127.0.0.1:11434"
 Environment="TOKENIZER_URL=http://127.0.0.1:8081"
 Environment="LOG_LEVEL=info"
+Environment="CLAUDE_MODEL_POLICY_FILE=/etc/ollama-compaction-proxy/claude-models.json"
 # Non-streaming inference on the 27B at low tok/s can run many minutes; the
 # defaults (upstream 10m, summarize 5m) sit right on that edge and abort a slow
 # turn. Give generous headroom so a long-but-healthy inference is never cut.

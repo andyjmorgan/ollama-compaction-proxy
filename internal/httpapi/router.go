@@ -7,6 +7,7 @@ import (
 
 // Routes are the handlers the router mounts.
 type Routes struct {
+	Models           http.HandlerFunc
 	Messages         http.HandlerFunc // POST /v1/messages
 	CountTokens      http.HandlerFunc // POST /v1/messages/count_tokens
 	Responses        http.HandlerFunc // POST /v1/responses
@@ -32,6 +33,10 @@ func NewRouter(r Routes, maxBodyBytes int64) http.Handler {
 	mux.HandleFunc("POST /v1/responses/compact", limit(r.ResponsesCompact))
 	mux.HandleFunc("POST /v1/chat/completions", limit(r.ChatCompletions))
 	mux.HandleFunc("GET /health", r.Health)
+	if r.Models != nil {
+		mux.HandleFunc("GET /v1/models", r.Models)
+		mux.HandleFunc("GET /v1/compaction/models", r.Models)
+	}
 
 	return mux
 }
