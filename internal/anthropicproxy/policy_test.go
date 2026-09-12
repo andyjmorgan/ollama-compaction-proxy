@@ -18,6 +18,7 @@ import (
 func TestNativeClaudeBudget(t *testing.T) {
 	count := 109999
 	calls := 0
+	var forwarded map[string]any
 	failCount := false
 	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/count-tokens" {
@@ -35,6 +36,7 @@ func TestNativeClaudeBudget(t *testing.T) {
 		calls++
 		var req map[string]any
 		json.NewDecoder(r.Body).Decode(&req)
+		forwarded = req
 		if req["max_tokens"].(float64) > 8192 {
 			t.Error("output reserve not enforced")
 		}
@@ -46,11 +48,13 @@ func TestNativeClaudeBudget(t *testing.T) {
 		"gemma": {ContextWindow: 131072, MaxOutputTokens: 8192, CompactAt: 110000},
 	}}
 	h := New(cfg, upstream.New(fake.URL, time.Second), tokencount.New(fake.URL), nil, slog.New(slog.DiscardHandler))
+	thinkingHeader := "X-Ollama-Thinking"
 	run := func(model, content string, enabled bool) *httptest.ResponseRecorder {
 		b, _ := json.Marshal(map[string]any{"model": model, "max_tokens": 10000, "messages": []map[string]string{{"role": "user", "content": content}}})
 		r := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(string(b)))
 		if enabled {
 			r.Header.Set("X-Claude-Compaction", "native")
+			r.Header.Set(thinkingHeader, "disabled")
 		}
 		w := httptest.NewRecorder()
 		h.Messages(w, r)
@@ -58,6 +62,9 @@ func TestNativeClaudeBudget(t *testing.T) {
 	}
 	if w := run("agent/gemma", "hello", true); w.Code != 200 {
 		t.Fatalf("below limit: %d %s", w.Code, w.Body)
+	}
+	if forwarded["thinking"].(map[string]any)["type"] != "disabled" {
+		t.Fatal("explicit thinking choice lost")
 	}
 	count = 110000
 	if w := run("agent/gemma", "hello", true); w.Code != 400 || !strings.Contains(w.Body.String(), "prompt is too long") {
@@ -72,6 +79,38 @@ func TestNativeClaudeBudget(t *testing.T) {
 	summary := "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.\nYour task is to create a detailed summary of the conversation so far"
 	if w := run("agent/gemma", summary, true); w.Code != 200 {
 		t.Fatalf("summary denied: %d", w.Code)
+	}
+	encoded, _ := json.Marshal(forwarded["messages"])
+	if !strings.Contains(string(encoded), "VERIFIED FACTS") {
+		t.Fatal("summary retention focus missing")
+	}
+	// Claude emits content blocks in real compaction requests. Preserve their
+	// existing fields while appending the same counted retention instruction.
+	body, _ := json.Marshal(map[string]any{"model": "agent/gemma", "max_tokens": 8192, "messages": []any{map[string]any{"role": "user", "content": []any{map[string]any{"type": "text", "text": summary, "cache_control": map[string]string{"type": "ephemeral"}}}}}})
+	r := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(string(body)))
+	r.Header.Set("X-Claude-Compaction", "native")
+	w := httptest.NewRecorder()
+	h.Messages(w, r)
+	if w.Code != 200 {
+		t.Fatalf("block summary denied: %d", w.Code)
+	}
+	encoded, _ = json.Marshal(forwarded["messages"])
+	if !strings.Contains(string(encoded), "VERIFIED FACTS") || !strings.Contains(string(encoded), "cache_control") {
+		t.Fatal("block summary lost retention focus or metadata")
+	}
+	thinkingHeader = "X-Ollama-Summary-Thinking"
+	count = 1000
+	if w := run("agent/gemma", "hello", true); w.Code != 200 {
+		t.Fatal(w.Code)
+	}
+	if _, ok := forwarded["thinking"]; ok {
+		t.Fatal("summary-only setting changed ordinary inference")
+	}
+	if w := run("agent/gemma", summary, true); w.Code != 200 {
+		t.Fatal(w.Code)
+	}
+	if forwarded["thinking"].(map[string]any)["type"] != "disabled" {
+		t.Fatal("summary thinking choice lost")
 	}
 	count = 131072 - 8192
 	if w := run("agent/gemma", summary, true); w.Code != 400 {

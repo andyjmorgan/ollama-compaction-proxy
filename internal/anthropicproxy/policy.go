@@ -83,12 +83,40 @@ func (h *Handler) enforceClaudeBudget(w http.ResponseWriter, r *http.Request, re
 		httpapi.WriteError(w, httpapi.DialectAnthropic, 400, "no Claude compaction policy for model")
 		return true
 	}
+	// Claude may omit thinking configuration for unrecognized model names.
+	// Preserve the application's explicit choice across that compatibility gap.
+	if r.Header.Get("X-Ollama-Thinking") == "disabled" || (r.Header.Get("X-Ollama-Summary-Thinking") == "disabled" && claudeSummary(body)) {
+		req.Thinking = &messages.ThinkingConfig{Type: "disabled"}
+	}
+	summary := claudeSummary(body)
+	if summary {
+		// Keep Claude's summary protocol, adding a model-neutral retention focus.
+		// Count the augmented request, including this instruction, before forwarding.
+		for i := len(req.Messages) - 1; i >= 0; i-- {
+			m := &req.Messages[i]
+			if m.Role != "user" {
+				continue
+			}
+			const focus = "\n\nRetention requirement: Begin your summary with an explicit VERIFIED FACTS section. Copy the exact values of facts the user asked you to remember from earlier tool results, including names, identifiers, numbers and codewords. Do not merely say that facts exist or must be reported. Then list completed work and the next action. Omit repetitive bulk data. Never invent a missing value."
+			if text, ok := m.ContentAsString(); ok {
+				_ = m.SetContentString(text + focus)
+			} else if blocks, ok := m.ContentAsBlocks(); ok {
+				for j := len(blocks) - 1; j >= 0; j-- {
+					if text, ok := blocks[j].(*messages.TextBlock); ok {
+						text.Text += focus
+						break
+					}
+				}
+				_ = m.SetContentBlocks(blocks)
+			}
+			break
+		}
+	}
 	count, err := h.countRequest(r.Context(), req)
 	if err != nil {
 		httpapi.WriteError(w, httpapi.DialectAnthropic, 503, "token counting unavailable; refusing unchecked context")
 		return true
 	}
-	summary := claudeSummary(body)
 	limit := p.CompactAt
 	if summary {
 		limit = p.ContextWindow - p.MaxOutputTokens

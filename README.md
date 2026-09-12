@@ -92,7 +92,12 @@ contract from the server-side compact edit above. Opt in with
 Anthropic dialect and returns a standard `prompt is too long` error at that
 model's budget. Claude performs its own reactive summary and continues the
 same session, including native subagents. Recognized summary requests can use
-the physical window minus the output reserve. Counting outages fail closed on
+the physical window minus the output reserve. The proxy adds a generic exact-fact
+retention requirement to the native summary instruction and counts that augmented
+request. `X-Ollama-Thinking: disabled` explicitly restores disabled thinking when
+Claude omits its thinking field for unfamiliar model names. For summary requests
+only, use `X-Ollama-Summary-Thinking: disabled` instead; ordinary tasks then keep
+their model default. Counting outages fail closed on
 this opt-in path; requests without the header retain their previous behavior.
 
 `GET /v1/compaction/models` (also `/v1/models` when accessed directly) exposes
