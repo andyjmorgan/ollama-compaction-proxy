@@ -13,9 +13,10 @@ import (
 
 // ClaudeModel is an opt-in native Claude compaction policy.
 type ClaudeModel struct {
-	ContextWindow   int `json:"context_window"`
-	MaxOutputTokens int `json:"max_output_tokens"`
-	CompactAt       int `json:"compact_at_input_tokens"`
+	ContextWindow   int    `json:"context_window"`
+	MaxOutputTokens int    `json:"max_output_tokens"`
+	CompactAt       int    `json:"compact_at_input_tokens"`
+	SummaryThinking string `json:"summary_thinking,omitempty"`
 }
 
 // Config is the proxy's runtime configuration.
@@ -105,6 +106,9 @@ func FromEnv() (*Config, error) {
 			return nil, fmt.Errorf("decode Claude policies: %w", err)
 		}
 		for model, p := range cfg.ClaudeModels {
+			if p.SummaryThinking != "" && p.SummaryThinking != "enabled" && p.SummaryThinking != "disabled" {
+				return nil, fmt.Errorf("invalid summary_thinking policy for %s", model)
+			}
 			if model == "" || p.CompactAt < 1024 || p.MaxOutputTokens < 1 || p.ContextWindow <= p.MaxOutputTokens || p.CompactAt >= p.ContextWindow-p.MaxOutputTokens {
 				return nil, fmt.Errorf("invalid Claude policy for %q", model)
 			}

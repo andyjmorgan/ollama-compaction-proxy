@@ -16,17 +16,18 @@ import (
 // can use this catalog to configure their runtime before starting a session.
 func (h *Handler) Models(w http.ResponseWriter, r *http.Request) {
 	type row struct {
-		ID             string `json:"id"`
-		Type           string `json:"type"`
-		DisplayName    string `json:"display_name"`
-		ContextWindow  int    `json:"context_window"`
-		MaxInputTokens int    `json:"max_input_tokens"`
-		MaxTokens      int    `json:"max_tokens"`
-		CompactAt      int    `json:"compact_at_input_tokens"`
+		ID              string `json:"id"`
+		Type            string `json:"type"`
+		DisplayName     string `json:"display_name"`
+		ContextWindow   int    `json:"context_window"`
+		MaxInputTokens  int    `json:"max_input_tokens"`
+		MaxTokens       int    `json:"max_tokens"`
+		CompactAt       int    `json:"compact_at_input_tokens"`
+		SummaryThinking string `json:"summary_thinking,omitempty"`
 	}
 	rows := []row{}
 	for model, p := range h.cfg.ClaudeModels {
-		rows = append(rows, row{h.cfg.ModelPrefix + model, "model", model, p.ContextWindow, p.ContextWindow - p.MaxOutputTokens, p.MaxOutputTokens, p.CompactAt})
+		rows = append(rows, row{h.cfg.ModelPrefix + model, "model", model, p.ContextWindow, p.ContextWindow - p.MaxOutputTokens, p.MaxOutputTokens, p.CompactAt, p.SummaryThinking})
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
 	w.Header().Set("Content-Type", "application/json")
@@ -89,6 +90,11 @@ func (h *Handler) enforceClaudeBudget(w http.ResponseWriter, r *http.Request, re
 		req.Thinking = &messages.ThinkingConfig{Type: "disabled"}
 	}
 	summary := claudeSummary(body)
+	if summary && p.SummaryThinking != "" {
+		// Per-model summary policy overrides the client default on native
+		// compaction requests only. Count using the mode actually forwarded.
+		req.Thinking = &messages.ThinkingConfig{Type: p.SummaryThinking}
+	}
 	if summary {
 		// Keep Claude's summary protocol, adding a model-neutral retention focus.
 		// Count the augmented request, including this instruction, before forwarding.

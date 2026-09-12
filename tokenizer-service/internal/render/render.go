@@ -292,7 +292,12 @@ func (n *normalized) appendMessages(raw json.RawMessage) {
 			msg.ToolName = toolName
 		}
 
-		if msg.Content == "" && len(msg.ToolCalls) == 0 && msg.ToolName == "" {
+		// Native renderers consume both fields. In particular Glimmer resolves
+		// tool-result labels through ToolCallID and renders prior thinking.
+		_ = json.Unmarshal(item["tool_call_id"], &msg.ToolCallID)
+		_ = json.Unmarshal(item["thinking"], &msg.Thinking)
+
+		if msg.Content == "" && msg.Thinking == "" && len(msg.ToolCalls) == 0 && msg.ToolName == "" && msg.ToolCallID == "" {
 			continue
 		}
 		n.Messages = append(n.Messages, msg)

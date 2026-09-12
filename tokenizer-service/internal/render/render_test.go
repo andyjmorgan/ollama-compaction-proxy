@@ -1,6 +1,9 @@
 package render_test
 
 import (
+	"encoding/json"
+	"github.com/ollama/ollama/api"
+	"github.com/ollama/ollama/model/renderers"
 	"strings"
 	"testing"
 
@@ -170,5 +173,27 @@ func TestResponsesToolItemsCounted(t *testing.T) {
 		if !strings.Contains(got.Text, want) {
 			t.Errorf("rendered text %q missing %q", got.Text, want)
 		}
+	}
+}
+
+func TestNativeThinkingAndToolResultIdentitySurviveNormalization(t *testing.T) {
+	const body = `{"model":"test","think":false,"messages":[{"role":"user","content":"Find alpha."},{"role":"assistant","thinking":"Remember the owner is Ada."},{"role":"assistant","tool_calls":[{"id":"call_one","function":{"name":"lookup","arguments":{"name":"alpha"}}}]},{"role":"tool","tool_call_id":"call_one","content":"Owner Ada; count 7391."}]}`
+	var native struct {
+		Messages []api.Message `json:"messages"`
+	}
+	if err := json.Unmarshal([]byte(body), &native); err != nil {
+		t.Fatal(err)
+	}
+	for _, renderer := range []string{"glimmer", "gemma4"} {
+		t.Run(renderer, func(t *testing.T) {
+			want, err := renderers.RenderWithRenderer(renderer, native.Messages, nil, &api.ThinkValue{Value: false})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := render.Render(parse(t, body), render.Model{Renderer: renderer})
+			if got.Text != want {
+				t.Fatalf("native message fields lost\ngot: %q\nwant: %q", got.Text, want)
+			}
+		})
 	}
 }

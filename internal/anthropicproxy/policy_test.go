@@ -19,9 +19,11 @@ func TestNativeClaudeBudget(t *testing.T) {
 	count := 109999
 	calls := 0
 	var forwarded map[string]any
+	var counted map[string]any
 	failCount := false
 	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/count-tokens" {
+			json.NewDecoder(r.Body).Decode(&counted)
 			if r.Header.Get("X-Tokenizer-Dialect") != "anthropic" {
 				t.Error("missing Anthropic tokenizer dialect")
 			}
@@ -112,6 +114,26 @@ func TestNativeClaudeBudget(t *testing.T) {
 	if forwarded["thinking"].(map[string]any)["type"] != "disabled" {
 		t.Fatal("summary thinking choice lost")
 	}
+	// A model-specific summary mode must affect counting and inference alike,
+	// while ordinary requests continue to honor the client's thinking choice.
+	policy := cfg.ClaudeModels["gemma"]
+	policy.SummaryThinking = "enabled"
+	cfg.ClaudeModels["gemma"] = policy
+	thinkingHeader = "X-Ollama-Thinking"
+	if w := run("agent/gemma", summary, true); w.Code != 200 {
+		t.Fatal(w.Code)
+	}
+	if counted["thinking"].(map[string]any)["type"] != "enabled" || forwarded["thinking"].(map[string]any)["type"] != "enabled" {
+		t.Fatal("summary mode differs between counting and inference")
+	}
+	if w := run("agent/gemma", "hello", true); w.Code != 200 {
+		t.Fatal(w.Code)
+	}
+	if forwarded["thinking"].(map[string]any)["type"] != "disabled" {
+		t.Fatal("summary policy changed ordinary inference")
+	}
+	policy.SummaryThinking = ""
+	cfg.ClaudeModels["gemma"] = policy
 	count = 131072 - 8192
 	if w := run("agent/gemma", summary, true); w.Code != 400 {
 		t.Fatal("summary bypassed physical window")

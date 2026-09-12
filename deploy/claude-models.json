@@ -8,5 +8,16 @@
     "context_window": 131072,
     "max_output_tokens": 8192,
     "compact_at_input_tokens": 110000
+  },
+  "gemma4:e4b": {
+    "context_window": 131072,
+    "max_output_tokens": 8192,
+    "compact_at_input_tokens": 110000
+  },
+  "muse-glimmer:latest": {
+    "context_window": 131072,
+    "max_output_tokens": 8192,
+    "compact_at_input_tokens": 110000,
+    "summary_thinking": "enabled"
   }
 }

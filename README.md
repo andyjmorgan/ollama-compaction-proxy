@@ -100,6 +100,13 @@ only, use `X-Ollama-Summary-Thinking: disabled` instead; ordinary tasks then kee
 their model default. Counting outages fail closed on
 this opt-in path; requests without the header retain their previous behavior.
 
+Configured native policies include Qwen 3.6 at 230k and Gemma 26B, Gemma E4B,
+and `muse-glimmer:latest` at 110k. Both added models serve 131072-token
+contexts with an 8192-token output reserve. Muse has `summary_thinking: enabled`: it
+requires reasoning for reliable native summaries. A configured per-model summary
+mode overrides client thinking defaults for summary requests only and is applied
+before counting. Ordinary inference retains the client/model setting.
+
 `GET /v1/compaction/models` (also `/v1/models` when accessed directly) exposes
 the configured serving windows, output limits and compaction budgets. In Claude
 2.1.269, generic gateway `/v1/models` discovery is only a picker facility and
