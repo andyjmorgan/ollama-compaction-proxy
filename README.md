@@ -1,79 +1,95 @@
 # Ollama compaction proxy
 
-Native, server-side **context compaction** for locally hosted Ollama models —
-on both provider wire protocols, consumable unmodified by the official SDKs:
+This proxy gives locally hosted Ollama models native, server-side context compaction. The official Anthropic and OpenAI SDKs talk to it unmodified.
 
-- **Anthropic Messages** (`/v1/messages`) — the `compact-2026-01-12` beta
-  contract: `context_management.edits` with `compact_20260112`, the
-  `compaction` content block, `compaction_delta` streaming, `stop_reason:
-  "compaction"`, `usage.iterations`.
-- **OpenAI Responses** (`/v1/responses`) — `context_management:
-  [{"type":"compaction","compact_threshold":N}]`, the `compaction` output
-  item, the `compaction_trigger` input item, and the standalone
-  `POST /v1/responses/compact` endpoint.
+It speaks two wire protocols:
 
-The proxy fronts Ollama's own compat endpoints (Ollama ≥ 0.32 serves both
-dialects natively), so it is a *compaction middleware*, not a protocol
-translator: requests that need no compaction work pass through byte-for-byte.
+- Anthropic Messages at `/v1/messages`, using the `compact-2026-01-12` beta contract: `context_management.edits` with `compact_20260112`, the `compaction` content block, `compaction_delta` streaming, `stop_reason: "compaction"` and `usage.iterations`
+- OpenAI Responses at `/v1/responses`, using `context_management: [{"type":"compaction","compact_threshold":N}]`, the `compaction` output item, the `compaction_trigger` input item and the standalone `POST /v1/responses/compact` endpoint
 
-```
-Anthropic SDK ──┐                          ┌── /v1/messages ──────┐
-OpenAI SDK ─────┼──► compaction proxy ─────┼── /v1/responses ─────┼──► Ollama
-Agents SDK ─────┘        :8082             └── /v1/chat/completions┘   :11434
-                           │
-                           └──► ollama-tokenizer-service :8081  (rendered counts)
+The proxy sits in front of Ollama's own compatibility endpoints. Ollama 0.32 and later serves both dialects natively, so this is compaction middleware, not a protocol translator. Requests that need no compaction pass through byte for byte.
+
+```mermaid
+flowchart LR
+    A["Anthropic SDK"] --> P
+    O["OpenAI SDK"] --> P
+    G["Agents SDK"] --> P
+    C["Claude Code"] --> P
+    P["Compaction proxy<br/>:8082"] --> L["Ollama<br/>:11434"]
+    P <-->|"exact token counts"| T["Tokenizer service<br/>:8081"]
+    T -->|"tokenizer and<br/>render rules"| L
 ```
 
 ## Repository layout
 
-Two independent Go modules — the proxy, and the tokenizer primitive it counts
-with. They deploy as separate systemd units on the same host and talk over
-loopback.
+The repository holds two independent Go modules. They deploy as separate systemd units on the same host and talk over loopback.
 
-| Path | Module | Port | What it is |
+| Path | Module | Port | What it does |
 |---|---|---|---|
-| `.` | `github.com/andyjmorgan/ollama-compaction-proxy` | 8082 | This proxy: compaction on the Anthropic and OpenAI wire protocols |
-| `tokenizer-service/` | `.../tokenizer-service` | 8081 | [Exact token counts](tokenizer-service/README.md) from the model's own tokenizer |
+| `.` | `github.com/andyjmorgan/ollama-compaction-proxy` | 8082 | this proxy: compaction on both wire protocols |
+| `tokenizer-service/` | `.../tokenizer-service` | 8081 | [exact token counts](tokenizer-service/README.md) from the model's own tokenizer |
 
-Each builds and tests from its own directory (`go test ./...`); the nested
-module is not part of the root module's package tree.
+Each module builds and tests from its own directory with `go test ./...`. The nested module sits outside the root module's package tree, so the two stay independent.
 
 ## How compaction works
 
-1. Each request is inspected. A round-tripped compaction block/item is
-   **reconstituted**: the compacted history is replaced by the carried summary
-   before the model sees anything.
-2. The post-substitution request is **counted using the model tokenizer** (via the tokenizer
-   service, after dialect normalization and model-specific rendering).
-3. If the request opts into compaction and the count crosses the trigger, the
-   history is **summarized through Ollama** (`COMPACT_MODEL`, or the request's
-   model) and the request is rebuilt around the summary.
+The proxy inspects every request, counts it, and summarizes only when the count crosses the client's trigger.
+
+```mermaid
+flowchart TD
+    A["Request arrives"] --> B{"Carries a compaction<br/>block or item?"}
+    B -->|yes| C["Reconstitute: replace the<br/>compacted history with<br/>the carried summary"]
+    B -->|no| D
+    C --> D["Count the request through<br/>the tokenizer service"]
+    D --> E{"Opted into compaction<br/>and over the trigger?"}
+    E -->|no| F["Forward unchanged"]
+    E -->|yes| G["Summarize the history<br/>through Ollama"]
+    G --> H["Rebuild the request<br/>around the summary"]
+    H --> I["Forward to Ollama"]
+    F --> I
+    I --> J["Return the response with<br/>compaction state in the<br/>provider's native shape"]
+```
+
+The four steps in words:
+
+1. The proxy reconstitutes any round-tripped compaction state. It replaces the compacted history with the carried summary before the model sees anything.
+2. It counts the rebuilt request through the tokenizer service, after dialect normalization and model-specific rendering.
+3. If the request opted into compaction and the count crosses the trigger, the proxy summarizes the history through Ollama. It uses `COMPACT_MODEL`, or the request's own model when that is unset.
 4. The response carries the compaction state in the provider's native shape.
-   The client's ordinary append-output-to-input loop round-trips it; the proxy
-   holds **no state** — everything rides the message contract.
-
-State integrity: `encrypted_content` is `base64url(JSON ‖ HMAC-SHA256)`.
-Signed, not encrypted — the payload is the client's own conversation summary;
-what matters is rejecting tampered/foreign state. Policy per dialect:
-
-- **Anthropic**: bad blob falls back to the block's client-visible plaintext
-  `content`; if that is also null, the block is a no-op (Anthropic's own
-  failed-compaction semantic) and full history is kept.
-- **OpenAI**: bad blob → 400. `encrypted_content` is the *only* carrier of the
-  compacted context there; silently dropping it would produce amnesiac answers.
 
 ## Statelessness contract
 
-The proxy stores nothing. `previous_response_id` and `conversation` are
-rejected with a clear 400; `store` is accepted and ignored. Point the SDKs at
-the proxy and chain turns client-side:
+The proxy stores nothing. Everything rides the message contract, so the client's ordinary append-output-to-input loop round-trips the state.
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant P as Proxy
+    participant L as Ollama
+    C->>P: turn 1, full history
+    P->>L: forward, under trigger
+    L-->>P: response
+    P-->>C: response
+    Note over C: client appends output to history
+    C->>P: turn 2, history now over trigger
+    P->>L: summarize the history
+    L-->>P: summary text
+    P->>L: rebuilt request, summary plus recent turns
+    L-->>P: response
+    P-->>C: response plus signed compaction state
+    Note over C: client appends it like any other output
+    C->>P: turn 3, carries the compaction state
+    P->>P: reconstitute from the carried summary
+```
+
+The proxy rejects `previous_response_id` and `conversation` with a clear 400. It accepts `store` and ignores it.
 
 ```python
-# OpenAI / Agents SDK
+# OpenAI and Agents SDK
 client = OpenAI(base_url="http://spark:8082/v1", api_key="unused")
 r = client.responses.create(model="gemma4:e4b", store=False, input=history,
     extra_body={"context_management": [{"type": "compaction", "compact_threshold": 8000}]})
-history += [item.model_dump(exclude_unset=True) for item in r.output]  # round-trips the compaction item
+history += [item.model_dump(exclude_unset=True) for item in r.output]
 
 # Anthropic SDK
 client = anthropic.Anthropic(base_url="http://spark:8082", api_key="unused")
@@ -85,133 +101,263 @@ r = client.beta.messages.create(model="gemma4:e4b", max_tokens=1000,
 history.append({"role": "assistant", "content": [b.model_dump(exclude_unset=True) for b in r.content]})
 ```
 
-Claude Code / Claude Agent SDK use **client-side** compaction, a different
-contract from the server-side compact edit above. Opt in with
-`X-Claude-Compaction: native` and configure `CLAUDE_MODEL_POLICY_FILE` (see
-`deploy/claude-models.json`). The proxy counts each Messages request using the
-Anthropic dialect and returns a standard `prompt is too long` error at that
-model's budget. Claude performs its own reactive summary and continues the
-same session, including native subagents. Recognized summary requests can use
-the physical window minus the output reserve. The proxy adds a generic exact-fact
-retention requirement to the native summary instruction and counts that augmented
-request. `X-Ollama-Thinking: disabled` explicitly restores disabled thinking when
-Claude omits its thinking field for unfamiliar model names. For summary requests
-only, use `X-Ollama-Summary-Thinking: disabled` instead; ordinary tasks then keep
-their model default. Counting outages fail closed on
-this opt-in path; requests without the header retain their previous behavior.
+### How the state stays trustworthy
 
-Configured native policies include Qwen 3.6 at 230k and Gemma 26B, Gemma E4B,
-and `muse-glimmer:latest` at 110k. Both added models serve 131072-token
-contexts with an 8192-token output reserve. Muse has `summary_thinking: enabled`: it
-requires reasoning for reliable native summaries. A configured per-model summary
-mode overrides client thinking defaults for summary requests only and is applied
-before counting. Ordinary inference retains the client/model setting.
+The `encrypted_content` field is `base64url(JSON ‖ HMAC-SHA256)`. The proxy signs it rather than encrypting it. The payload is the client's own conversation summary, so what matters is rejecting tampered or foreign state, not hiding the text.
 
-`GET /v1/compaction/models` (also `/v1/models` when accessed directly) exposes
-the configured serving windows, output limits and compaction budgets. In Claude
-2.1.269, generic gateway `/v1/models` discovery is only a picker facility and
-ignores these context fields. The SDK application must read the explicit
-policy endpoint and configure the runtime. The process-global window cannot
-represent mixed Qwen/Gemma limits; the proxy applies each model's own budget.
+Each dialect handles a bad blob differently, because the consequences differ:
 
-Validated application and full test harness:
-`/home/localuser/source/anthropic-agent-sdk-example`. Runtime compatibility is
-pinned to Claude Code 2.1.269; rerun the native SDK compaction acceptance test
-before upgrading. Summary recognition is compatibility logic, not an auth
-boundary, and never bypasses the physical context reserve.
+- Anthropic falls back to the block's client-visible plaintext `content`. If that is null too, the block becomes a no-op and the full history is kept. This matches Anthropic's own failed-compaction semantics.
+- OpenAI returns a 400. There, `encrypted_content` is the only carrier of the compacted context, so dropping it silently would produce amnesiac answers.
 
-The Agents SDK's `OpenAIResponsesCompactionSession` works against
-`/v1/responses/compact` — note its *client-side* model-name gate accepts only
-`gpt-*`-style names (`gpt-oss:20b` passes; alias other models with
-`ollama cp` if needed).
+## Native Claude compaction
+
+Claude Code and the Claude Agent SDK compact on the client side. That is a different contract from the server-side compact edit above, so it has its own opt-in path.
+
+Turn it on with the `X-Claude-Compaction: native` request header and a policy file in `CLAUDE_MODEL_POLICY_FILE`. The proxy then stops summarizing behind Claude's back. Instead it counts each request and returns a standard `prompt is too long` error at the model's budget, which drives Claude's own reactive summary. The session continues, including native subagents that inherit the parent window.
+
+```mermaid
+flowchart TD
+    A["Messages request with<br/>X-Claude-Compaction: native"] --> B{"Policy exists<br/>for this model?"}
+    B -->|no| C["400 no Claude compaction<br/>policy for model"]
+    B -->|yes| D["Count through the tokenizer<br/>in Anthropic dialect"]
+    D --> E{"Count succeeded?"}
+    E -->|no| F["503 token counting unavailable<br/>fail closed"]
+    E -->|yes| G{"Is this a recognized<br/>summary request?"}
+    G -->|yes| H["limit = context_window<br/>minus max_output_tokens"]
+    G -->|no| I["limit = compact_at_input_tokens"]
+    H --> J{"count >= limit?"}
+    I --> J
+    J -->|yes| K["400 prompt is too long<br/>Claude summarizes and retries"]
+    J -->|no| L["Clamp max_tokens to the<br/>output reserve, then forward"]
+```
+
+Three details matter here:
+
+- summary requests get the full physical window minus the output reserve. Without that carve-out, compaction itself could be refused and the session would deadlock.
+- the overflow error carries no token-gap hint, deliberately. A hint makes Claude truncate history instead of summarizing. Token counts stay accurate in the logs.
+- counting outages fail closed on this path. Requests without the header keep their previous behavior.
+
+Summary recognition is compatibility logic, not an authentication boundary. It never bypasses the physical context reserve.
+
+### Reading the policy from a client
+
+`GET /v1/compaction/models` returns the configured serving windows, output limits and compaction budgets. `GET /v1/models` returns the same thing when you reach the proxy directly.
+
+In Claude 2.1.269, generic gateway discovery through `/v1/models` is only a picker facility and ignores the context fields. Your application has to read the explicit policy endpoint and configure the runtime itself. A process-global window cannot represent mixed Qwen and Gemma limits, so the proxy applies each model's own budget per request.
+
+Runtime compatibility is pinned to Claude Code 2.1.269. Rerun the native SDK compaction acceptance test before upgrading. The validated application and test harness live in `/home/localuser/source/anthropic-agent-sdk-example`.
+
+## Configuration
+
+### Environment variables
+
+| Variable | Default | What it controls |
+|---|---|---|
+| `LISTEN_ADDR` | `:8082` | listen address |
+| `OLLAMA_URL` | `http://127.0.0.1:11434` | upstream Ollama |
+| `TOKENIZER_URL` | `http://127.0.0.1:8081` | the tokenizer service |
+| `CLAUDE_MODEL_POLICY_FILE` | unset | path to the native Claude policy file, described below |
+| `COMPACT_PROMPT_FILE` | unset | path to a file holding your own summarization prompt |
+| `COMPACT_MODEL` | the request's model | a dedicated summarizer model |
+| `MODEL_PREFIX` | `agent/` | routing prefix stripped from model names; empty disables it |
+| `COMPACT_HMAC_KEY` | random per boot, with a warning | signs compaction state; persist it |
+| `COMPACT_DEFAULT_TRIGGER_ANTHROPIC` | `150000` | used when the edit carries no trigger |
+| `COMPACT_DEFAULT_THRESHOLD_OPENAI` | `200000` | used when the entry carries no threshold |
+| `COMPACT_MIN_TRIGGER` | `1024` | floor on client-supplied triggers |
+| `MAX_BODY_BYTES` | `67108864` | request body cap |
+| `SUMMARIZE_TIMEOUT` | `5m` | summarization call timeout |
+| `UPSTREAM_TIMEOUT` | `10m` | non-streaming upstream timeout |
+| `LOG_LEVEL` | `info` | log verbosity |
+
+Persist `COMPACT_HMAC_KEY` across restarts. If you do not, clients holding older compaction state will have it rejected. The deploy script generates one into `/etc/ollama-compaction-proxy/env` on first install.
+
+### Adding a model to the native Claude policy
+
+The policy file is a JSON object. Each key is the real Ollama model ID, without the routing prefix.
+
+```json
+{
+  "qwen3.6:35b-a3b": {
+    "context_window": 262144,
+    "max_output_tokens": 8192,
+    "compact_at_input_tokens": 230000
+  },
+  "muse-glimmer:latest": {
+    "context_window": 131072,
+    "max_output_tokens": 8192,
+    "compact_at_input_tokens": 110000,
+    "summary_thinking": "enabled"
+  }
+}
+```
+
+| Field | Required | Meaning |
+|---|---|---|
+| `context_window` | yes | the physical context the model serves |
+| `max_output_tokens` | yes | output reserve; the proxy clamps a larger `max_tokens` down to this |
+| `compact_at_input_tokens` | yes | the budget at which Claude is told to compact |
+| `summary_thinking` | no | `enabled` or `disabled`, applied to summary requests only |
+
+The proxy validates every policy at startup and refuses to start if one is wrong. The rules are:
+
+- `compact_at_input_tokens` is at least 1024
+- `max_output_tokens` is at least one
+- `context_window` is greater than `max_output_tokens`
+- `compact_at_input_tokens` is below `context_window` minus `max_output_tokens`, which keeps room for the summary request itself
+- `summary_thinking`, when present, is exactly `enabled` or `disabled`
+
+To add a model, edit `deploy/claude-models.json`, then redeploy. The file is read once at startup, so a change needs a restart.
+
+Before you add a policy, check the tokenizer's render tier for that model. Older Qwen models that use unsupported Jinja templates fall back to plain concatenation, and their counts drift.
+
+The shipped policy covers Qwen 3.6 at 230k, and Gemma 26B, Gemma E4B and `muse-glimmer:latest` at 110k. Muse sets `summary_thinking: enabled` because it needs reasoning to produce reliable native summaries. A configured summary mode overrides the client's thinking default for summary requests only, and the proxy applies it before counting. Ordinary inference keeps the client or model setting.
+
+### Changing the summarization prompt
+
+The proxy ships a built-in summarization prompt, `DefaultInstructions` in `internal/summarize/prompt.go`. It tells the summarizer to capture the goal, the decisions and exact identifiers, the useful tool results, the current state and the pending task.
+
+Three sources can supply the prompt. The first one that is non-blank wins:
+
+1. The caller's own instructions, sent in the request. The Anthropic contract makes these a full replacement, not an addition, so they override everything.
+2. Your house prompt, from the file named by `COMPACT_PROMPT_FILE`.
+3. The built-in `DefaultInstructions`.
+
+To set a house prompt, write the file and point the service at it:
+
+```console
+sudo tee /etc/ollama-compaction-proxy/compact-prompt.txt >/dev/null <<'PROMPT'
+You are compacting a long conversation so it can continue in less context.
+Keep every command, file path, and identifier exactly as written.
+PROMPT
+echo 'COMPACT_PROMPT_FILE=/etc/ollama-compaction-proxy/compact-prompt.txt' \
+  | sudo tee -a /etc/ollama-compaction-proxy/env >/dev/null
+sudo systemctl restart ollama-compaction-proxy
+```
+
+The unit already loads `/etc/ollama-compaction-proxy/env`, and deploys do not overwrite it. The proxy refuses to start if the file is missing or blank, so a typo fails loudly rather than silently reverting to the default.
+
+The prompt is the largest single lever on compaction quality. Test a change against a real conversation before you rely on it.
+
+### Pointing at a different tokenizer
+
+Set `TOKENIZER_URL`. The proxy calls `POST /count-tokens` on that service and sends `X-Tokenizer-Dialect: anthropic` for Messages requests.
+
+That header matters. Generic flattening loses tool names, tool schemas, call and result structure, and thinking blocks, all of which cost real tokens. In the lab, one tool-bearing request counted 271 tokens flattened and 344 tokens in Anthropic dialect.
+
+The tokenizer service has its own settings. See the [tokenizer service configuration](tokenizer-service/README.md#configuration).
 
 ## Endpoints
 
 | Endpoint | Behavior |
 |---|---|
-| `GET /v1/compaction/models` | Configured native Claude serving policies (also GET /v1/models directly) |
-| `POST /v1/messages` | Anthropic dialect + compaction |
-| `POST /v1/messages/count_tokens` | Proxy-implemented (Ollama has none); substitution-aware |
-| `POST /v1/responses` | OpenAI dialect + compaction |
-| `POST /v1/responses/compact` | Standalone client-driven compaction |
-| `POST /v1/chat/completions` | Byte passthrough + stream watchdog (no compaction) |
-| `GET /health` | Proxy + Ollama + tokenizer reachability |
+| `GET /v1/compaction/models` | configured native Claude policies |
+| `GET /v1/models` | the same catalog, for direct callers |
+| `POST /v1/messages` | Anthropic dialect plus compaction |
+| `POST /v1/messages/count_tokens` | implemented by the proxy, since Ollama has none; substitution-aware |
+| `POST /v1/responses` | OpenAI dialect plus compaction |
+| `POST /v1/responses/compact` | standalone client-driven compaction |
+| `POST /v1/chat/completions` | byte passthrough with a stream watchdog; no compaction |
+| `GET /health` | proxy, Ollama and tokenizer reachability |
 
-## What the proxy fixes vs passes through
+### Request headers
 
-**Fixed** (they break SDKs or the contract):
-- `content: null` messages (Ollama 400s) — normalized.
-- Swallowed mid-stream Ollama errors — the proxy tracks terminal events and
-  synthesizes a proper `error` / `response.failed` frame instead of letting
-  the SDK hang on a silently truncated stream.
-- Missing `count_tokens` endpoint — implemented.
-- `math/rand` outer response IDs — re-minted from crypto/rand on rewrite turns.
-
-**Passed through, documented** (upstream Ollama bugs, better fixed there):
-- `/v1/responses` streams suppress text output once any tool call appears.
-- `output_index` collides for multiple streamed tool calls.
-- Streaming vs non-streaming inner item IDs differ for the same request.
-- `usage.input_tokens_details.cached_tokens` / `reasoning_tokens` hardcoded 0.
-- `message_start.usage.input_tokens` is a `len/4` estimate; `message_delta`'s
-  value is authoritative (SDKs already treat it that way).
-
-**Counting caveat**: these are rendering-based estimates, not a promise of
-zero drift. Anthropic requests must use `X-Tokenizer-Dialect: anthropic` at the
-tokenizer service (the proxy sets it). Generic flattening loses tool schemas
-and call/result structure. Qwen 3.6 plain-text parity was exact in the lab;
-small residual differences remain for complex tool-bearing prompts. Old
-Qwen models using unsupported Jinja templates can still fall back to
-concatenation; inspect the tokenizer's render tier before enabling a policy.
-
-## Configuration
-
-| Env | Default | |
+| Header | Values | Effect |
 |---|---|---|
-| `LISTEN_ADDR` | `:8082` | |
-| `OLLAMA_URL` | `http://127.0.0.1:11434` | |
-| `TOKENIZER_URL` | `http://127.0.0.1:8081` | ollama-tokenizer-service |
-| `CLAUDE_MODEL_POLICY_FILE` | *(unset)* | JSON map of actual Ollama model IDs to context_window, max_output_tokens, compact_at_input_tokens; native Claude opt-in only |
-| `COMPACT_MODEL` | *(request model)* | dedicated summarizer model |
-| `MODEL_PREFIX` | `agent/` | routing prefix stripped from model names; empty disables |
-| `COMPACT_HMAC_KEY` | *(random per boot + warning)* | persist it — deploy generates one in `/etc/ollama-compaction-proxy/env` |
-| `COMPACT_DEFAULT_TRIGGER_ANTHROPIC` | `150000` | when the edit has no trigger |
-| `COMPACT_DEFAULT_THRESHOLD_OPENAI` | `200000` | when the entry has no threshold |
-| `COMPACT_MIN_TRIGGER` | `1024` | floor on client-supplied triggers |
-| `MAX_BODY_BYTES` | `67108864` | |
-| `SUMMARIZE_TIMEOUT` | `5m` | |
-| `UPSTREAM_TIMEOUT` | `10m` | non-streaming calls |
-| `LOG_LEVEL` | `info` | |
+| `X-Claude-Compaction` | `native` | opts into the native Claude budget path |
+| `X-Ollama-Thinking` | `disabled` | restores disabled thinking when Claude omits the field for an unfamiliar model |
+| `X-Ollama-Summary-Thinking` | `disabled` | same, but for summary requests only, so ordinary tasks keep their default |
+| `X-Claude-Code-Session-Id` | any string | recorded in the budget log lines |
 
-Logging is structured JSON (journald). Requests log model, token counts,
-trigger decisions, summarizer spend, and stream health — **never** message
-content, summaries, or blobs.
+## What the proxy returns
 
-## Gateway integration (SlipSpace)
+### Error responses
 
-The proxy is wired into the SlipSpace gateway as the `agent-compaction`
-provider: any model prefixed `agent/` (e.g. `agent/gemma4:e4b`) routes here on
-the chat, responses, and messages protocols, and the proxy strips the prefix
-before resolving the model — so every model the Spark's Ollama serves gets the
-compaction lane with zero per-model config. `/v1/messages/count_tokens` and
-`/v1/responses/compact` ride a passthrough family on the same provider.
+Every error uses the calling dialect's own error envelope, so the SDKs parse it normally. Anthropic errors carry a `request_id`.
+
+| Status | Message | When it happens |
+|---|---|---|
+| 400 | `prompt is too long for the configured N input-token budget; compact the conversation` | native Claude path, count at or above the budget |
+| 400 | `no Claude compaction policy for model` | native header sent for a model with no policy |
+| 400 | `invalid JSON` | the body did not parse |
+| 400 | `model is required` | no model in the request |
+| 400 | `failed to read request body` | the body could not be read, or exceeded `MAX_BODY_BYTES` |
+| 400 | `unprocessable compaction block` | Anthropic compaction block the proxy cannot use |
+| 400 | bad compaction state, OpenAI dialect | tampered or foreign `encrypted_content` |
+| 502 | `upstream unavailable` | Ollama could not be reached |
+| 502 | `token counting unavailable` | the tokenizer service failed on a counting path |
+| 502 | `failed to process upstream response` | the upstream reply could not be parsed |
+| 502 | `compaction failed` | the summarizer failed on the OpenAI compact endpoint |
+| 503 | `token counting unavailable; refusing unchecked context` | native Claude path, counting failed, so the proxy fails closed |
+| 500 | `failed to rebuild request`, `failed to build response`, `failed to encode compaction state` | internal errors worth reporting as bugs |
+
+### Log events
+
+Logs are structured JSON on journald. They record models, token counts, trigger decisions, summarizer spend and stream health. They never record message content, summaries or compaction state.
+
+| Event | Level | What it tells you |
+|---|---|---|
+| `request served` | info | one line per request, with model and timing |
+| `compaction ran` | info | a summary replaced history, with token counts and summarizer spend |
+| `claude context budget checked` | info | native path admitted the request, with count and limit |
+| `claude context budget reached` | info | native path refused the request, so Claude will summarize |
+| `token count unavailable; skipping compaction trigger` | error | counting failed, so the proxy forwarded without compacting |
+| `summarization failed; compaction skipped` | error | the summarizer failed, so full history was kept |
+| `blob encode failed; compaction skipped` | error | compaction state could not be encoded |
+| `rejecting invalid compaction state` | warn | a tampered or foreign blob arrived |
+| `stream truncated; synthesized terminal error` | warn | Ollama cut a stream short and the proxy closed it properly |
+| `COMPACT_HMAC_KEY not set` | warn | running on a per-boot key, so state will not survive a restart |
+| `configuration invalid` | error | startup refused, usually a bad policy file or prompt file |
+
+A failed summarization never loses the conversation. The proxy keeps the full history and forwards it.
+
+## What the proxy fixes, and what it passes through
+
+It fixes the things that break SDKs or the contract:
+
+- `content: null` messages, which make Ollama return 400, are normalized
+- swallowed mid-stream Ollama errors become a proper `error` or `response.failed` frame, so the SDK does not hang on a silently truncated stream
+- the missing `count_tokens` endpoint is implemented
+- outer response IDs generated with `math/rand` are re-minted from `crypto/rand` on rewrite turns
+
+It passes through known upstream Ollama bugs, which are better fixed there:
+
+- `/v1/responses` streams suppress text output once any tool call appears
+- `output_index` collides for multiple streamed tool calls
+- streaming and non-streaming inner item IDs differ for the same request
+- `usage.input_tokens_details.cached_tokens` and `reasoning_tokens` are hardcoded to zero
+- `message_start.usage.input_tokens` is a length-over-four estimate, while `message_delta` carries the authoritative value, which the SDKs already prefer
+
+### How accurate the counts are
+
+These are rendering-based counts, not a promise of zero drift. Qwen 3.6 plain-text parity was exact in the lab. Small differences remain for complex tool-bearing prompts.
+
+## Gateway integration with SlipSpace
+
+The proxy is wired into the SlipSpace gateway as the `agent-compaction` provider. Any model prefixed `agent/` routes here on the chat, responses and messages protocols. The proxy strips the prefix before resolving the model, so every model the Spark's Ollama serves gets the compaction lane with no per-model gateway config. The `/v1/messages/count_tokens` and `/v1/responses/compact` endpoints ride a passthrough family on the same provider.
 
 ```python
 client = OpenAI(base_url="https://sluice.donkeywork.dev/v1", api_key="<slipspace key>")
 r = client.responses.create(model="agent/gemma4:e4b", store=False, ...)
 ```
 
-Caveat: the OpenAI **Agents SDK** parses `provider/` prefixes in model strings
-itself and rejects `agent/...` — pass a Model object to bypass its resolver:
-`Agent(model=OpenAIResponsesModel(model="agent/gemma4:e4b", openai_client=client))`.
+Watch out for the OpenAI Agents SDK. It parses `provider/` prefixes in model strings itself and rejects `agent/...`. Pass a model object to bypass its resolver:
+
+```python
+Agent(model=OpenAIResponsesModel(model="agent/gemma4:e4b", openai_client=client))
+```
+
+The Agents SDK's `OpenAIResponsesCompactionSession` works against `/v1/responses/compact`. Its client-side model-name gate accepts only `gpt-*` style names. `gpt-oss:20b` passes; alias other models with `ollama cp` if you need to.
 
 ## Development
 
 ```console
-go build ./... && go test ./... -race     # hermetic; scripted fake Ollama + tokenizer
+go build ./... && go test ./... -race
 ```
 
-SDK-fidelity smoke tests (real SDKs, real models, run against a deployed
-proxy):
+The tests are hermetic. They run against a scripted fake Ollama and tokenizer.
+
+The SDK fidelity smoke tests use the real SDKs and real models against a deployed proxy:
 
 ```console
 PROXY_URL=http://192.168.69.28:8082 MODEL=gemma4:e4b \
@@ -222,19 +368,19 @@ PROXY_URL=http://192.168.69.28:8082 MODEL=gemma4:e4b \
   <openai-venv>/bin/python sdk-tests/agents_smoke.py
 ```
 
-Wire types come from [slipspace-gateway](https://github.com/andyjmorgan/slipspace-gateway)'s
-`protocols/` packages (pinned at a pseudo-version — the repo's v2 tags predate
-a `/v2` module path and are not resolvable). The block registries there are
-sealed; incoming compaction blocks are read via the `UnknownBlock` passthrough
-and outgoing ones are constructed locally.
+Wire types come from the [slipspace-gateway protocols packages](https://github.com/andyjmorgan/slipspace-gateway). They are pinned at a pseudo-version, because the repository's v2 tags predate a `/v2` module path and will not resolve. The block registries there are sealed, so the proxy reads incoming compaction blocks through the `UnknownBlock` passthrough and builds outgoing ones locally.
 
 ## Deployment
 
 ```console
-./deploy/deploy.sh          # arm64 cross-compile → scp → systemd on the Spark
+./deploy/deploy.sh          # cross-compile for arm64, copy, install the unit
 ```
 
-Runs as `ollama-compaction-proxy.service` beside `ollama.service` and
-`ollama-tokenizer.service`, as the `ollama` user, HTTP-only. The deploy script
-generates a persistent `COMPACT_HMAC_KEY` on first install so compaction blobs
-survive restarts.
+Deploy the tokenizer service first when both have changed. The proxy's Anthropic-dialect counting depends on the tokenizer understanding `X-Tokenizer-Dialect`.
+
+```console
+cd tokenizer-service && ./deploy/deploy.sh
+cd .. && ./deploy/deploy.sh
+```
+
+The proxy runs as `ollama-compaction-proxy.service`, beside `ollama.service` and `ollama-tokenizer.service`, as the `ollama` user, over HTTP only. The deploy script installs `claude-models.json` to `/etc/ollama-compaction-proxy/` and generates a persistent `COMPACT_HMAC_KEY` on first install, so compaction state survives restarts.

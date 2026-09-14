@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -29,6 +30,10 @@ type Config struct {
 	// CompactModel is the model used for summarization. Empty means use the
 	// model of the request being compacted.
 	CompactModel string
+
+	// CompactPrompt replaces the built-in summarization prompt. Empty means
+	// use summarize.DefaultInstructions.
+	CompactPrompt string
 
 	// ModelPrefix, when non-empty, is stripped from incoming model names —
 	// e.g. "agent/gemma4:e4b" resolves to "gemma4:e4b". This lets a fronting
@@ -95,6 +100,17 @@ func FromEnv() (*Config, error) {
 		}
 		slog.Warn("COMPACT_HMAC_KEY not set: using a random per-boot key; " +
 			"compaction blobs will not survive a restart")
+	}
+
+	if file := os.Getenv("COMPACT_PROMPT_FILE"); file != "" {
+		raw, err := os.ReadFile(file)
+		if err != nil {
+			return nil, fmt.Errorf("read compaction prompt: %w", err)
+		}
+		if len(strings.TrimSpace(string(raw))) == 0 {
+			return nil, fmt.Errorf("COMPACT_PROMPT_FILE %q is empty", file)
+		}
+		cfg.CompactPrompt = string(raw)
 	}
 
 	if file := os.Getenv("CLAUDE_MODEL_POLICY_FILE"); file != "" {

@@ -25,13 +25,32 @@ type Summarizer struct {
 
 	// Model overrides the summarizer model; empty means use the model passed
 	// per call (the conversation's own model).
-	Model   string
+	Model string
+
+	// Instructions overrides DefaultInstructions as the operator-supplied
+	// house prompt. Caller-supplied instructions still win: the Anthropic
+	// contract says they REPLACE the default entirely.
+	Instructions string
+
 	Timeout time.Duration
 }
 
 // New returns a Summarizer using client.
 func New(client *upstream.Client, model string, timeout time.Duration) *Summarizer {
 	return &Summarizer{client: client, Model: model, Timeout: timeout}
+}
+
+// resolveInstructions picks the summarization prompt. Caller instructions win
+// outright (the Anthropic contract makes them a replacement, not an addition),
+// then the operator's house prompt, then the built-in default.
+func resolveInstructions(s *Summarizer, caller string) string {
+	if strings.TrimSpace(caller) != "" {
+		return caller
+	}
+	if strings.TrimSpace(s.Instructions) != "" {
+		return s.Instructions
+	}
+	return DefaultInstructions
 }
 
 // Summarize condenses transcript using instructions (the full replacement
@@ -41,9 +60,7 @@ func (s *Summarizer) Summarize(ctx context.Context, requestModel, instructions, 
 	if model == "" {
 		model = requestModel
 	}
-	if strings.TrimSpace(instructions) == "" {
-		instructions = DefaultInstructions
-	}
+	instructions = resolveInstructions(s, instructions)
 
 	ctx, cancel := context.WithTimeout(ctx, s.Timeout)
 	defer cancel()

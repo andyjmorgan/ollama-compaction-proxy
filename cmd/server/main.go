@@ -34,6 +34,7 @@ func main() {
 	up := upstream.New(cfg.OllamaURL, cfg.UpstreamTimeout)
 	counter := tokencount.New(cfg.TokenizerURL)
 	summarizer := summarize.New(up, cfg.CompactModel, cfg.SummarizeTimeout)
+	summarizer.Instructions = cfg.CompactPrompt
 
 	anthropic := anthropicproxy.New(cfg, up, counter, summarizer, log)
 	openaiHandler := openaiproxy.New(cfg, up, counter, summarizer, log)
