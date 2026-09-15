@@ -172,9 +172,33 @@ Runtime compatibility is pinned to Claude Code 2.1.269. Rerun the native SDK com
 
 Persist `COMPACT_HMAC_KEY` across restarts. If you do not, clients holding older compaction state will have it rejected. The deploy script generates one into `/etc/ollama-compaction-proxy/env` on first install.
 
-### Adding a model to the native Claude policy
+### Adding a model
 
-The policy file is a JSON object. Each key is the real Ollama model ID, without the routing prefix.
+Most models need no configuration at all. Any model Ollama serves works through the proxy already, because `MODEL_PREFIX` strips the routing prefix and the model name passes straight through. Server-side compaction on the Anthropic and OpenAI paths takes its trigger from the request, not from a policy file.
+
+You only add a policy entry to put a model on the native Claude path, where the proxy enforces a budget instead of summarizing.
+
+First, check that the tokenizer renders the model properly. Counts on a badly rendered model are worthless, and nothing else warns you:
+
+```console
+curl -s http://ollama-host:8081/count-tokens \
+  -d '{"model":"gemma4:e4b","messages":[{"role":"user","content":"probe"}]}'
+ssh ollama-host 'sudo journalctl -u ollama-tokenizer -n 1 -o cat'
+```
+
+Look at `render_tier` in that log line. A value of `renderer` or `template` is good. A value of `concat` means the model fell back to plain concatenation and undercounts by 30% to 65%, so do not give it a policy until that is fixed.
+
+Second, read the model's real context window from Ollama rather than guessing:
+
+```console
+curl -s http://ollama-host:11434/api/show -d '{"model":"gemma4:e4b"}' \
+  | python3 -c 'import json,sys; mi=json.load(sys.stdin)["model_info"]; \
+    print({k:v for k,v in mi.items() if k.endswith("context_length")})'
+```
+
+That returns `{'gemma4.context_length': 131072}`, which is the number to use for `context_window`.
+
+Third, add the entry to `deploy/claude-models.json`. Each key is the real Ollama model ID, without the routing prefix.
 
 ```json
 {
@@ -199,19 +223,26 @@ The policy file is a JSON object. Each key is the real Ollama model ID, without 
 | `compact_at_input_tokens` | yes | the budget at which Claude is told to compact |
 | `summary_thinking` | no | `enabled` or `disabled`, applied to summary requests only |
 
+Leave headroom between `compact_at_input_tokens` and the physical window. The shipped entries sit about 12% below it, which leaves room for the summary request that compaction itself sends.
+
 The proxy validates every policy at startup and refuses to start if one is wrong. The rules are:
 
 - `compact_at_input_tokens` is at least 1024
 - `max_output_tokens` is at least one
 - `context_window` is greater than `max_output_tokens`
-- `compact_at_input_tokens` is below `context_window` minus `max_output_tokens`, which keeps room for the summary request itself
+- `compact_at_input_tokens` is below `context_window` minus `max_output_tokens`
 - `summary_thinking`, when present, is exactly `enabled` or `disabled`
 
-To add a model, edit `deploy/claude-models.json`, then redeploy. The file is read once at startup, so a change needs a restart.
+Fourth, deploy. The script installs the file to `/etc/ollama-compaction-proxy/claude-models.json` and restarts the service, which reads the file once at startup.
 
-Before you add a policy, check the tokenizer's render tier for that model. Older Qwen models that use unsupported Jinja templates fall back to plain concatenation, and their counts drift.
+```console
+./deploy/deploy.sh
+curl -s http://ollama-host:8082/v1/compaction/models | python3 -m json.tool
+```
 
-The shipped policy covers Qwen 3.6 at 230k, and Gemma 26B, Gemma E4B and `muse-glimmer:latest` at 110k. Muse sets `summary_thinking: enabled` because it needs reasoning to produce reliable native summaries. A configured summary mode overrides the client's thinking default for summary requests only, and the proxy applies it before counting. Ordinary inference keeps the client or model setting.
+The catalog should list your model. Editing the installed file directly also works for a quick test, but the next deploy overwrites it, so put the change in the repo.
+
+A model that needs reasoning to summarize reliably sets `summary_thinking: enabled`, as `muse-glimmer:latest` does. That setting overrides the client's thinking default for summary requests only, and the proxy applies it before counting. Ordinary inference keeps the client or model setting.
 
 ### Changing the summarization prompt
 
