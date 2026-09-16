@@ -368,7 +368,7 @@ These are rendering-based counts, not a promise of zero drift. Qwen 3.6 plain-te
 The proxy is wired into the SlipSpace gateway as the `agent-compaction` provider. Any model prefixed `agent/` routes here on the chat, responses and messages protocols. The proxy strips the prefix before resolving the model, so every model the Spark's Ollama serves gets the compaction lane with no per-model gateway config. The `/v1/messages/count_tokens` and `/v1/responses/compact` endpoints ride a passthrough family on the same provider.
 
 ```python
-client = OpenAI(base_url="https://sluice.donkeywork.dev/v1", api_key="<slipspace key>")
+client = OpenAI(base_url="https://<your-gateway>/v1", api_key="<gateway key>")
 r = client.responses.create(model="agent/gemma4:e4b", store=False, ...)
 ```
 
